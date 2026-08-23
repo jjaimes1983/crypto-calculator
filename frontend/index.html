@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crypto Calculator</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Crypto Calculator</h1>
+  <p class="subtitle">Purchase averages, holdings, and the buy-to-target-average tool. All figures in EUR.</p>
+</header>
+
+<main>
+  <section id="upload-section" class="card">
+    <h2>Import transactions</h2>
+    <form id="upload-form">
+      <label>
+        Exchange
+        <select name="exchange" id="exchange-select">
+          <option value="binance">Binance (Spot Trade History CSV)</option>
+          <option value="coinbase">Coinbase (Transaction History CSV)</option>
+        </select>
+      </label>
+      <label>
+        File
+        <input type="file" name="file" id="file-input" accept=".csv,.xlsx" required>
+      </label>
+      <button type="submit">Upload &amp; import</button>
+    </form>
+    <div id="upload-result"></div>
+  </section>
+
+  <section id="holdings-section">
+    <h2>Holdings</h2>
+    <div id="holdings-empty" class="empty-state" hidden>No holdings yet — import a transaction file above to get started.</div>
+    <div id="holdings-list"></div>
+  </section>
+</main>
+
+<template id="holding-template">
+  <div class="card holding-card">
+    <div class="holding-header">
+      <div class="symbol"></div>
+      <div class="quantity"></div>
+    </div>
+    <div class="holding-stats">
+      <div class="stat"><span class="label">Avg. cost</span><span class="value avg-cost"></span></div>
+      <div class="stat"><span class="label">Current price</span><span class="value current-price"></span></div>
+      <div class="stat"><span class="label">Invested</span><span class="value total-cost"></span></div>
+      <div class="stat"><span class="label">Unrealized P/L</span><span class="value unrealized-pl"></span></div>
+    </div>
+
+    <details class="calculator">
+      <summary>Target-average calculator</summary>
+      <div class="calc-body">
+        <label>
+          Target average (EUR)
+          <input type="number" step="any" class="calc-target" placeholder="e.g. 25000">
+        </label>
+        <label>
+          Hypothetical buy price (EUR)
+          <input type="number" step="any" class="calc-price" placeholder="e.g. 20000">
+        </label>
+        <div class="calc-result"></div>
+      </div>
+    </details>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
