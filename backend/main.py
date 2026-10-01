@@ -1,5 +1,7 @@
 import shutil
 import tempfile
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
@@ -12,10 +14,11 @@ from sqlalchemy.exc import IntegrityError
 from .database import get_db, SessionLocal, engine, Base
 from . import models
 from .models import Asset, Transaction, TxType
-from .parsers import binance, coinbase
+from .parsers import binance, binance_fills, coinbase
 from .calculations import compute_holding, solve_target_average
 from .prices import fetch_current_prices_eur
 from . import schemas
+from . import config as config_store
 
 Base.metadata.create_all(bind=engine)
 
@@ -32,6 +35,7 @@ def index():
 
 PARSERS = {
     "binance": binance.parse_file,
+    "binance_fills": binance_fills.parse_file,
     "coinbase": coinbase.parse_file,
 }
 
@@ -99,14 +103,28 @@ async def upload_file(exchange: str = Form(...), file: UploadFile = File(...), d
     )
 
 
+@app.get("/config", response_model=schemas.ConfigOut)
+def get_config():
+    return schemas.ConfigOut(tracked_symbols=config_store.get_tracked_symbols())
+
+
+@app.put("/config", response_model=schemas.ConfigOut)
+def update_config(req: schemas.ConfigUpdate):
+    updated = config_store.set_tracked_symbols(req.tracked_symbols)
+    return schemas.ConfigOut(tracked_symbols=updated)
+
+
 @app.get("/assets", response_model=List[schemas.HoldingOut])
 def list_assets(db: Session = Depends(get_db)):
+    tracked = set(config_store.get_tracked_symbols())
     assets = db.query(Asset).all()
     holdings = []
     symbols = []
     computed = []
 
     for asset in assets:
+        if tracked and asset.symbol.upper() not in tracked:
+            continue
         h = compute_holding(asset.transactions)
         if h is None or h.quantity <= 0:
             continue
@@ -146,6 +164,51 @@ def asset_transactions(symbol: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "Asset not found")
     txs = sorted(asset.transactions, key=lambda t: t.timestamp)
     return txs
+
+
+@app.post("/assets/{symbol}/manual-transaction", response_model=schemas.TransactionOut)
+def add_manual_transaction(symbol: str, req: schemas.ManualTransactionRequest, db: Session = Depends(get_db)):
+    """For anything that didn't come from an exchange export - e.g. an
+    unexplained wallet balance discrepancy. Leave price_eur at 0 (the
+    default) if you don't know the cost; that's recorded plainly (and
+    shown in the transaction list as such) rather than guessed - you can
+    delete and re-add it later once/if you pin down an actual value."""
+    tx_type = req.tx_type.strip().lower()
+    if tx_type not in ("buy", "sell"):
+        raise HTTPException(400, "tx_type must be 'buy' or 'sell'")
+    if req.quantity <= 0:
+        raise HTTPException(400, "quantity must be positive")
+
+    asset = _get_or_create_asset(db, symbol.upper())
+    timestamp = req.timestamp or datetime.utcnow()
+    total_eur = req.price_eur * req.quantity
+
+    tx = Transaction(
+        asset_id=asset.id,
+        tx_type=TxType(tx_type),
+        quantity=req.quantity,
+        price_eur=req.price_eur,
+        fee_eur=0.0,
+        total_eur=total_eur,
+        timestamp=timestamp,
+        exchange="manual",
+        external_id=f"manual:{uuid.uuid4().hex}",
+        notes=req.notes,
+    )
+    db.add(tx)
+    db.commit()
+    db.refresh(tx)
+    return tx
+
+
+@app.delete("/transactions/{transaction_id}")
+def delete_transaction(transaction_id: int, db: Session = Depends(get_db)):
+    tx = db.query(Transaction).filter(Transaction.id == transaction_id).first()
+    if not tx:
+        raise HTTPException(404, "Transaction not found")
+    db.delete(tx)
+    db.commit()
+    return {"deleted": True, "id": transaction_id}
 
 
 @app.post("/assets/{symbol}/target-average", response_model=schemas.TargetAverageResponse)

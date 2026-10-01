@@ -19,7 +19,8 @@
       <label>
         Exchange
         <select name="exchange" id="exchange-select">
-          <option value="binance">Binance (Spot Trade History CSV)</option>
+          <option value="binance">Binance (Spot Order History CSV)</option>
+          <option value="binance_fills">Binance (Spot Trade History CSV, with Fee column)</option>
           <option value="coinbase">Coinbase (Transaction History CSV)</option>
         </select>
       </label>
@@ -30,6 +31,20 @@
       <button type="submit">Upload &amp; import</button>
     </form>
     <div id="upload-result"></div>
+  </section>
+
+  <section id="settings-section" class="card">
+    <details>
+      <summary><h2 style="display:inline">Settings</h2></summary>
+      <div class="settings-body">
+        <label>
+          Dashboard shows only these assets (comma-separated; leave empty to show everything)
+          <input type="text" id="tracked-symbols-input" placeholder="e.g. BTC, AVAX, XRP">
+        </label>
+        <button type="button" id="save-settings-btn">Save</button>
+        <div id="settings-result"></div>
+      </div>
+    </details>
   </section>
 
   <section id="holdings-section">
@@ -66,6 +81,57 @@
         <div class="calc-result"></div>
       </div>
     </details>
+
+    <details class="manual-adjust">
+      <summary>Add manual adjustment</summary>
+      <div class="manual-body">
+        <p class="hint">For anything that didn't come from an exchange import - e.g. an unexplained wallet balance.
+          Leave EUR cost blank if you don't know it (recorded as unknown, not guessed).</p>
+        <label>
+          Type
+          <select class="manual-type">
+            <option value="buy">Add to holdings (buy/received)</option>
+            <option value="sell">Remove from holdings (sell/sent)</option>
+          </select>
+        </label>
+        <label>
+          Quantity
+          <input type="number" step="any" class="manual-quantity" placeholder="e.g. 5.5">
+        </label>
+        <label>
+          EUR cost (optional - leave blank if unknown)
+          <input type="number" step="any" class="manual-price" placeholder="e.g. 20 (per unit)">
+        </label>
+        <label>
+          Date (optional - defaults to now)
+          <input type="date" class="manual-date">
+        </label>
+        <label class="notes-label">
+          Notes
+          <input type="text" class="manual-notes" placeholder="e.g. unexplained wallet discrepancy">
+        </label>
+        <button type="button" class="manual-submit-btn">Add</button>
+        <div class="manual-result"></div>
+      </div>
+    </details>
+
+    <details class="tx-history">
+      <summary>Transaction history</summary>
+      <div class="tx-list"></div>
+    </details>
+  </div>
+</template>
+
+<template id="tx-row-template">
+  <div class="tx-row">
+    <span class="tx-date"></span>
+    <span class="tx-type"></span>
+    <span class="tx-qty"></span>
+    <span class="tx-price"></span>
+    <span class="tx-total"></span>
+    <span class="tx-exchange"></span>
+    <span class="tx-notes"></span>
+    <button type="button" class="tx-delete" title="Delete this transaction">&times;</button>
   </div>
 </template>
 

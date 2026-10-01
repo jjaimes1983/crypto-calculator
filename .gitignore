@@ -6,3 +6,12 @@ data/uploads/*
 !data/uploads/.gitkeep
 data/*.db
 .DS_Store
+
+# Personal financial data - never commit
+data/*.db*
+data/imports/
+data/fx_cache.json
+*.csv
+# One-off data-fix scripts contain real transactions
+finalize_*.command
+cleanup_*.command

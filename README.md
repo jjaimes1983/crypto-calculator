@@ -5,6 +5,17 @@ your weighted-average cost basis per asset (in EUR), and figure out how
 much you'd need to buy at a given price to move your average to a target
 value.
 
+## Quick start (easiest way to run it)
+
+Double-click `run.command` in this folder. First time, it'll take a minute
+to set itself up (installing dependencies); after that it opens your
+browser straight to the app. To stop it, close the Terminal window it
+opened (or press Ctrl+C in it). If double-clicking warns that it's from
+an "unidentified developer", right-click the file instead and choose
+"Open" — that only needs to happen once.
+
+If you'd rather use the terminal directly, see "Setup" and "Run" below.
+
 ## Status / what to verify before trusting the numbers
 
 This was built without access to a real export file from your accounts, so

@@ -1,63 +1,84 @@
-"""Parser for Binance's Spot "Trade History" CSV export.
+"""Parser for Binance's Spot "Order History" CSV export.
 
-Where to get this file in Binance: Orders > Spot Order > Trade History >
-Export Trade History. Expected columns (as of Binance's current export):
+Where to get this file in Binance: Orders > Spot Order > Order History >
+Export. Column layout confirmed against a real export (2026-08-23):
 
-    Date(UTC), Pair, Side, Price, Executed, Amount, Fee, Fee Coin
+    Time, OrderNo, Pair, Type, Side, Order Price, Order Amount, Time
+    (again - the fill/update time; pandas renames the duplicate header to
+    "Time.1"), Executed, Average Price, Trading total, Status
 
-Only EUR-quoted pairs (e.g. "BTCEUR") are imported automatically, because
-that's the currency this tool tracks cost basis in (see README). Trades in
-other quote currencies (BTCUSDT, ETHBUSD, ...) are reported but *skipped*
-rather than guessed-converted - crypto and FX both move fast enough that a
-guessed rate would quietly corrupt your average cost. If most of your
-trading is in USDT, tell me and I'll add a proper historical-FX conversion
-step instead of skipping those rows.
+Quirks this format has that the earlier (wrong) "Trade History" guess
+didn't:
+- This is ORDER history, not trade history - it includes orders that
+  never filled. Only rows with Status == "FILLED" are real transactions;
+  everything else (CANCELED, etc.) is skipped.
+- Quantity/total columns have the asset glued directly onto the number
+  with no separator (e.g. "13.21AVAX", "99.075EUR") - parsed by taking
+  the leading numeric portion.
+- The fill price is "Average Price" (a plain number) - not "Order Price",
+  which is just the limit price the order was placed at and can differ
+  from what it actually filled at.
+- There's no fee column. "Trading total" is used as-is as the amount
+  moved (in the quote currency, before EUR conversion) - whatever fee
+  handling Binance already applied (fees are frequently deducted from
+  the received asset rather than added to the quote total, in which case
+  there's nothing to add here anyway). fee_eur is recorded as 0 rather
+  than guessed.
+- "OrderNo" is used directly as the de-dup key.
 
-Binance has changed its export format before. If your file's columns don't
-match COLUMN_MAP below, this parser will raise a clear error naming the
-columns it actually found - update COLUMN_MAP or the row-parsing logic to
-match.
+Currency handling: every trade's quote currency (EUR, a USD-family
+stablecoin, or another crypto asset like BTC in a pair such as AVAXBTC)
+goes through fx.rate_to_eur(), one shared conversion entry point used by
+both parsers - see fx.py and crypto_prices.py for how each case is
+resolved. A trade is skipped (and counted), never guessed, if the
+relevant historical price lookup fails.
 """
 import argparse
-import hashlib
-from datetime import datetime
+import re
 from pathlib import Path
 from typing import List
 
 import pandas as pd
 
 from .base import NormalizedTx
+from .. import fx
 
 EXCHANGE = "binance"
 
-# Expected source column -> internal name. Edit here first if Binance's
-# export headers differ from this.
 COLUMN_MAP = {
-    "Date(UTC)": "date",
+    "OrderNo": "order_no",
     "Pair": "pair",
     "Side": "side",
-    "Price": "price",
-    "Executed": "executed",
-    "Amount": "amount",
-    "Fee": "fee",
+    "Time.1": "fill_time",
+    "Executed²": "executed",
+    "Average Price": "avg_price",
+    "Trading total³": "total",
+    "Status": "status",
 }
 
+QUOTES = ["EUR", "USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
 
-def _row_external_id(row: dict) -> str:
-    raw = f"{EXCHANGE}|{row['date']}|{row['pair']}|{row['side']}|{row['executed']}|{row['price']}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+_NUM_PREFIX = re.compile(r"^-?[\d.]+")
+
+
+def _parse_amount(s) -> float:
+    """'13.21AVAX' -> 13.21, '99.075EUR' -> 99.075, '0EUR' -> 0.0"""
+    if isinstance(s, (int, float)):
+        return float(s)
+    s = str(s).strip()
+    m = _NUM_PREFIX.match(s)
+    if not m:
+        raise ValueError(f"Could not parse a leading number out of '{s}'")
+    return float(m.group())
 
 
 def _split_pair(pair: str):
-    """Split e.g. 'BTCEUR' -> ('BTC', 'EUR'). Handles the common quote
-    currencies Binance uses; extend QUOTES if you trade others."""
-    QUOTES = ["EUR", "USDT", "USDC", "BUSD", "USD", "BTC", "ETH", "BNB"]
+    """Split e.g. 'BTCEUR' -> ('BTC', 'EUR'), 'AVAXBTC' -> ('AVAX', 'BTC')."""
     pair = pair.upper().strip()
     for q in QUOTES:
         if pair.endswith(q) and len(pair) > len(q):
             return pair[: -len(q)], q
-    # Fall back: assume last 3 chars are the quote currency
-    return pair[:-3], pair[-3:]
+    return pair[:-3], pair[-3:]  # fallback guess: last 3 chars are the quote
 
 
 def parse_file(path: str) -> List[NormalizedTx]:
@@ -74,43 +95,58 @@ def parse_file(path: str) -> List[NormalizedTx]:
     df = df.rename(columns=COLUMN_MAP)
 
     results: List[NormalizedTx] = []
-    skipped_non_eur = 0
+    skipped_not_filled = 0
+    skipped_conversion_failed = 0
 
     for _, r in df.iterrows():
-        symbol, quote = _split_pair(str(r["pair"]))
-        if quote != "EUR":
-            skipped_non_eur += 1
+        if str(r["status"]).strip().upper() != "FILLED":
+            skipped_not_filled += 1
             continue
 
-        side = str(r["side"]).strip().lower()  # "buy" / "sell"
+        side = str(r["side"]).strip().lower()
         if side not in ("buy", "sell"):
             continue
 
-        quantity = float(r["executed"])
-        price_eur = float(r["price"])
-        fee_eur = float(r["fee"]) if not pd.isna(r["fee"]) else 0.0
-        amount = float(r["amount"])  # quantity * price, before fee
-        total_eur = amount + fee_eur if side == "buy" else amount - fee_eur
+        symbol, quote = _split_pair(str(r["pair"]))
+        executed_qty = _parse_amount(r["executed"])
+        if executed_qty == 0:
+            continue
 
-        row_dict = {"date": r["date"], "pair": r["pair"], "side": side,
-                    "executed": quantity, "price": price_eur}
+        avg_price_raw = float(r["avg_price"])
+        total_raw = _parse_amount(r["total"])
+        fill_time = pd.to_datetime(r["fill_time"]).to_pydatetime()
+
+        rate = fx.rate_to_eur(quote, fill_time.date())
+        if rate is None:
+            skipped_conversion_failed += 1
+            continue
+
+        price_eur = avg_price_raw * rate
+        total_eur = total_raw * rate
+
+        order_no = r.get("order_no")
+        external_id = f"{EXCHANGE}:{order_no}" if pd.notna(order_no) else None
 
         results.append(NormalizedTx(
             symbol=symbol,
             tx_type=side,
-            quantity=quantity,
+            quantity=executed_qty,
             price_eur=price_eur,
-            fee_eur=fee_eur,
+            fee_eur=0.0,  # not present in this export - see module docstring
             total_eur=total_eur,
-            timestamp=pd.to_datetime(r["date"]).to_pydatetime(),
+            timestamp=fill_time,
             exchange=EXCHANGE,
-            external_id=_row_external_id(row_dict),
+            external_id=external_id,
             source_file=Path(path).name,
         ))
 
-    if skipped_non_eur:
-        print(f"[binance parser] skipped {skipped_non_eur} non-EUR-quoted trade(s) - "
-              f"see module docstring for why.")
+    if skipped_not_filled:
+        print(f"[binance parser] skipped {skipped_not_filled} order(s) that weren't FILLED "
+              f"(canceled, expired, etc.).")
+    if skipped_conversion_failed:
+        print(f"[binance parser] skipped {skipped_conversion_failed} trade(s) - couldn't convert "
+              f"the quote currency to EUR for that date (see backend/fx.py and "
+              f"backend/crypto_prices.py docstrings).")
 
     return results
 
@@ -122,12 +158,12 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     txs = parse_file(args.path)
-    print(f"Parsed {len(txs)} EUR-quoted transaction(s):")
-    for t in txs[:20]:
+    print(f"Parsed {len(txs)} transaction(s):")
+    for t in txs[:30]:
         print(f"  {t.timestamp}  {t.tx_type.upper():4}  {t.quantity:>14.8f} {t.symbol:5} "
-              f"@ EUR {t.price_eur:.4f}  fee EUR {t.fee_eur:.4f}  total EUR {t.total_eur:.2f}")
-    if len(txs) > 20:
-        print(f"  ... and {len(txs) - 20} more")
+              f"@ EUR {t.price_eur:.4f}  total EUR {t.total_eur:.2f}")
+    if len(txs) > 30:
+        print(f"  ... and {len(txs) - 30} more")
 
     if not args.dry_run:
         print("Add --dry-run to only preview. Use the /upload API endpoint to actually import.")

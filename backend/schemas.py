@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel
 
 
@@ -13,6 +13,7 @@ class TransactionOut(BaseModel):
     timestamp: datetime
     exchange: str
     source_file: Optional[str] = None
+    notes: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -47,3 +48,19 @@ class UploadResult(BaseModel):
     parsed: int
     imported: int
     duplicates_skipped: int
+
+
+class ConfigOut(BaseModel):
+    tracked_symbols: List[str]
+
+
+class ConfigUpdate(BaseModel):
+    tracked_symbols: List[str]
+
+
+class ManualTransactionRequest(BaseModel):
+    tx_type: str  # "buy" or "sell"
+    quantity: float
+    price_eur: float = 0.0  # leave 0 for "unknown cost" (e.g. an unexplained wallet discrepancy)
+    timestamp: Optional[datetime] = None  # defaults to now if not given
+    notes: Optional[str] = None

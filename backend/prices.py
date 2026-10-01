@@ -4,6 +4,7 @@ has no effect on your stored average cost, and if a symbol can't be
 resolved or the API is unreachable, the dashboard just shows the price
 as unknown rather than failing the whole page.
 """
+from typing import List, Optional
 import requests
 
 # Common symbol -> CoinGecko id. Add to this if you hold something not listed.
@@ -33,7 +34,7 @@ SYMBOL_TO_ID = {
 COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price"
 
 
-def fetch_current_prices_eur(symbols: list[str], timeout: float = 5.0) -> dict:
+def fetch_current_prices_eur(symbols: List[str], timeout: float = 5.0) -> dict:
     """Returns {symbol: eur_price or None}. Never raises - network/API
     problems just result in None values so the dashboard degrades gracefully."""
     ids = {}

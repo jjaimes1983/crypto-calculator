@@ -77,3 +77,45 @@ button:hover { filter: brightness(1.1); }
 .calc-result { flex-basis: 100%; margin-top: 0.5rem; font-size: 0.9rem; }
 .calc-result.reachable { color: var(--green); }
 .calc-result.unreachable { color: var(--red); }
+
+#settings-section summary { cursor: pointer; }
+#settings-section summary h2 { font-size: 1.1rem; }
+.settings-body { display: flex; gap: 1rem; align-items: flex-end; flex-wrap: wrap; margin-top: 1rem; }
+.settings-body label { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: var(--muted); flex: 1 1 320px; }
+.settings-body input[type=text] {
+  background: #0f1115; color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem;
+}
+#settings-result { flex-basis: 100%; font-size: 0.85rem; color: var(--muted); }
+#settings-result.success { color: var(--green); }
+
+.manual-adjust, .tx-history { margin-top: 0.75rem; border-top: 1px solid var(--border); padding-top: 0.75rem; }
+.manual-adjust summary, .tx-history summary { cursor: pointer; color: var(--accent); font-size: 0.9rem; }
+.manual-body { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.75rem; align-items: flex-end; }
+.manual-body .hint { flex-basis: 100%; margin: 0 0 0.25rem; font-size: 0.8rem; color: var(--muted); }
+.manual-body label { display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: var(--muted); }
+.manual-body .notes-label { flex: 1 1 220px; }
+.manual-body input, .manual-body select {
+  background: #0f1115; color: var(--text); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem; width: 160px;
+}
+.manual-body .notes-label input { width: 100%; }
+.manual-result { flex-basis: 100%; margin-top: 0.25rem; font-size: 0.85rem; }
+.manual-result.success { color: var(--green); }
+.manual-result.error { color: var(--red); }
+
+.tx-list { margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.82rem; }
+.tx-row {
+  display: grid;
+  grid-template-columns: 8.5rem 3.2rem 7rem 7rem 6rem 4.5rem 1fr 1.5rem;
+  gap: 0.5rem; align-items: center;
+  padding: 0.35rem 0; border-bottom: 1px solid var(--border);
+  font-variant-numeric: tabular-nums;
+}
+.tx-row .tx-notes { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tx-row .tx-exchange { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
+.tx-delete {
+  background: transparent; border: none; color: var(--red); cursor: pointer;
+  font-size: 1rem; padding: 0; line-height: 1;
+}
+.tx-empty { color: var(--muted); font-size: 0.85rem; }

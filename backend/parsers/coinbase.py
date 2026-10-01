@@ -1,49 +1,72 @@
 """Parser for Coinbase's "Transaction History" CSV export.
 
-Where to get this file: Coinbase > Taxes & Reports (or Account Statements)
-> Transaction history > Generate/Download CSV. Expected columns (as of
-Coinbase's current export):
+Where to get this file: Coinbase > Taxes & Reports > Transaction history >
+Generate/Download CSV. Column layout confirmed against a real export
+(2026-08-23):
 
-    Timestamp, Transaction Type, Asset, Quantity Transacted,
-    Spot Price Currency, Spot Price at Transaction, Subtotal,
-    Total (inclusive of fees and/or spread), Fees and/or Spread, Notes
+    ID, Timestamp, Transaction Type, Asset, Quantity Transacted,
+    Price Currency, Price at Transaction, Subtotal,
+    Total (inclusive of fees and/or spread), Fees and/or Spread, Notes,
+    Sender Address, Recipient Address
 
-Only rows where "Spot Price Currency" is EUR are imported automatically,
-for the same reason noted in binance.py: no guessed FX conversion. Only
-"Buy" and "Sell" transaction types are imported; Send/Receive/Convert/
-Reward rows are reported but skipped (they're not purchases and don't
-have a straightforward EUR cost-basis interpretation without more rules).
-
-Coinbase's export has a few metadata lines above the real header row in
-some report styles - this parser auto-detects the header row by looking
-for "Transaction Type" in the first column.
+How rows are interpreted:
+- Every row with a nonzero "Quantity Transacted" is treated the same way,
+  regardless of "Transaction Type": a positive quantity is an acquisition
+  (Buy, Convert's incoming leg, Receive, Staking Income, Learning Reward,
+  ...), a negative quantity is a disposal (Sell, Convert's outgoing leg,
+  Send, ...). This matches how Jerson wants free/reward coins treated -
+  counted toward the average at their recorded value when received, same
+  as a purchase - and it means a paired "Convert" (two rows: one asset
+  leaving, one arriving) and a "Retail Staking Transfer" (two rows, same
+  asset, opposite sign, same instant - just moving into/out of staking)
+  both fall out correctly with no special-case code.
+- Rows whose "Asset" is itself a fiat currency (shouldn't normally appear
+  in a crypto transaction history, but guarded against) are skipped.
+- Amounts come in USD on this account. Per Jerson's choice, everything is
+  converted to EUR using the *historical* rate on that transaction's date,
+  via fx.rate_to_eur() - the same conversion entry point the Binance
+  parser uses, so a "Price Currency" of EUR, a fiat/stablecoin, or (in
+  principle, though not seen in a real Coinbase export) another crypto
+  asset are all handled the same way. A row is skipped (and counted) if
+  the relevant historical rate can't be fetched - see fx.py's and
+  crypto_prices.py's docstrings for why that's a real risk right now
+  (untested against either API from a network-restricted build
+  environment).
+- The "ID" column (Coinbase's own transaction id) is used directly as the
+  de-dup key, prefixed with the exchange name.
 """
 import argparse
 import hashlib
+from datetime import datetime
 from pathlib import Path
 from typing import List
 
 import pandas as pd
 
 from .base import NormalizedTx
+from .. import fx
 
 EXCHANGE = "coinbase"
 
 COLUMN_MAP = {
+    "ID": "id",
     "Timestamp": "timestamp",
     "Transaction Type": "type",
     "Asset": "asset",
     "Quantity Transacted": "quantity",
-    "Spot Price Currency": "currency",
-    "Spot Price at Transaction": "spot_price",
+    "Price Currency": "currency",
+    "Price at Transaction": "spot_price",
     "Total (inclusive of fees and/or spread)": "total",
     "Fees and/or Spread": "fee",
 }
 
+FIAT_ASSETS = {"USD", "EUR", "GBP", "CHF", "CAD", "AUD"}
+
 
 def _find_header_row(path: str) -> int:
-    """Coinbase sometimes prepends a few summary lines before the real
-    header. Scan the first 10 lines for the row that looks like headers."""
+    """Coinbase prepends a few summary lines (account name, user id, ...)
+    before the real header. Scan the first 10 lines for the one that
+    looks like headers."""
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for i, line in enumerate(f.readlines()[:10]):
             if "Transaction Type" in line:
@@ -51,8 +74,18 @@ def _find_header_row(path: str) -> int:
     return 0
 
 
-def _row_external_id(row: dict) -> str:
-    raw = f"{EXCHANGE}|{row['timestamp']}|{row['asset']}|{row['type']}|{row['quantity']}|{row['spot_price']}"
+def _parse_money(x) -> float:
+    """Handles values like '$25.77926', '-$56.23448', '$0.00'."""
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip().replace(",", "").replace("$", "")
+    if s in ("", "-", "nan"):
+        return 0.0
+    return float(s)
+
+
+def _fallback_external_id(row: dict) -> str:
+    raw = f"{EXCHANGE}|{row['timestamp']}|{row['asset']}|{row['quantity']}|{row['spot_price']}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
@@ -71,45 +104,64 @@ def parse_file(path: str) -> List[NormalizedTx]:
     df = df.rename(columns=COLUMN_MAP)
 
     results: List[NormalizedTx] = []
-    skipped_non_eur = 0
-    skipped_other_type = 0
+    skipped_fiat = 0
+    skipped_zero_qty = 0
+    skipped_conversion_failed = 0
 
     for _, r in df.iterrows():
-        tx_type_raw = str(r["type"]).strip().lower()
-        if tx_type_raw not in ("buy", "sell"):
-            skipped_other_type += 1
-            continue
-
-        if str(r["currency"]).strip().upper() != "EUR":
-            skipped_non_eur += 1
+        asset = str(r["asset"]).strip().upper()
+        if asset in FIAT_ASSETS:
+            skipped_fiat += 1
             continue
 
         quantity = float(r["quantity"])
-        price_eur = float(r["spot_price"])
-        fee_eur = float(r["fee"]) if not pd.isna(r["fee"]) else 0.0
-        total_eur = float(r["total"])
+        if quantity == 0:
+            skipped_zero_qty += 1
+            continue
 
-        row_dict = {"timestamp": r["timestamp"], "asset": r["asset"], "type": tx_type_raw,
-                    "quantity": quantity, "spot_price": price_eur}
+        currency = str(r["currency"]).strip().upper()
+        total_raw = _parse_money(r["total"])
+        price_raw = _parse_money(r["spot_price"])
+        fee_raw = _parse_money(r["fee"])
+        tx_timestamp = pd.to_datetime(r["timestamp"]).to_pydatetime()
+
+        rate = fx.rate_to_eur(currency, tx_timestamp.date())
+        if rate is None:
+            skipped_conversion_failed += 1
+            continue
+
+        price_eur = price_raw * rate
+        total_eur = abs(total_raw) * rate
+        fee_eur = abs(fee_raw) * rate
+
+        row_dict = {"timestamp": r["timestamp"], "asset": asset,
+                    "quantity": quantity, "spot_price": r["spot_price"]}
+        raw_id = r.get("id")
+        external_id = f"{EXCHANGE}:{raw_id}" if pd.notna(raw_id) and str(raw_id).strip() \
+            else _fallback_external_id(row_dict)
 
         results.append(NormalizedTx(
-            symbol=str(r["asset"]).strip().upper(),
-            tx_type=tx_type_raw,
-            quantity=quantity,
+            symbol=asset,
+            tx_type="buy" if quantity > 0 else "sell",
+            quantity=abs(quantity),
             price_eur=price_eur,
             fee_eur=fee_eur,
             total_eur=total_eur,
-            timestamp=pd.to_datetime(r["timestamp"]).to_pydatetime(),
+            timestamp=tx_timestamp,
             exchange=EXCHANGE,
-            external_id=_row_external_id(row_dict),
+            external_id=external_id,
             source_file=Path(path).name,
+            notes=f"{r['type']}: {r.get('notes', '')}".strip(": "),
         ))
 
-    if skipped_non_eur:
-        print(f"[coinbase parser] skipped {skipped_non_eur} non-EUR-quoted row(s).")
-    if skipped_other_type:
-        print(f"[coinbase parser] skipped {skipped_other_type} non buy/sell row(s) "
-              f"(sends, receives, converts, rewards, etc.).")
+    if skipped_fiat:
+        print(f"[coinbase parser] skipped {skipped_fiat} row(s) whose asset was a fiat currency.")
+    if skipped_zero_qty:
+        print(f"[coinbase parser] skipped {skipped_zero_qty} row(s) with zero quantity.")
+    if skipped_conversion_failed:
+        print(f"[coinbase parser] skipped {skipped_conversion_failed} row(s) - couldn't convert "
+              f"the price currency to EUR for that date (see backend/fx.py and "
+              f"backend/crypto_prices.py docstrings).")
 
     return results
 
@@ -121,12 +173,12 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     txs = parse_file(args.path)
-    print(f"Parsed {len(txs)} EUR buy/sell transaction(s):")
-    for t in txs[:20]:
-        print(f"  {t.timestamp}  {t.tx_type.upper():4}  {t.quantity:>14.8f} {t.symbol:5} "
-              f"@ EUR {t.price_eur:.4f}  fee EUR {t.fee_eur:.4f}  total EUR {t.total_eur:.2f}")
-    if len(txs) > 20:
-        print(f"  ... and {len(txs) - 20} more")
+    print(f"Parsed {len(txs)} transaction(s):")
+    for t in txs[:30]:
+        print(f"  {t.timestamp}  {t.tx_type.upper():4}  {t.quantity:>18.8f} {t.symbol:6} "
+              f"@ EUR {t.price_eur:.6f}  fee EUR {t.fee_eur:.4f}  total EUR {t.total_eur:.2f}  [{t.notes}]")
+    if len(txs) > 30:
+        print(f"  ... and {len(txs) - 30} more")
 
     if not args.dry_run:
         print("Add --dry-run to only preview. Use the /upload API endpoint to actually import.")
