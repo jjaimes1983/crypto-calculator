@@ -1,107 +1,68 @@
 # Crypto Calculator
 
-Personal web tool to import your Binance/Coinbase purchase history, track
-your weighted-average cost basis per asset (in EUR), and figure out how
-much you'd need to buy at a given price to move your average to a target
-value.
+A personal web app that combines my Binance and Coinbase trade exports into one view of **average cost per asset in EUR**, and answers a question the exchanges don't: *"how much would I need to buy, at what price, to bring my average cost to X?"*
 
-## Quick start (easiest way to run it)
+Built by me with Claude as my coding partner. I set the requirements, made the product decisions below, and tested the results against my own real exchange exports.
 
-Double-click `run.command` in this folder. First time, it'll take a minute
-to set itself up (installing dependencies); after that it opens your
-browser straight to the app. To stop it, close the Terminal window it
-opened (or press Ctrl+C in it). If double-clicking warns that it's from
-an "unidentified developer", right-click the file instead and choose
-"Open" — that only needs to happen once.
+![Import screen](docs/screenshot-import.png)
 
-If you'd rather use the terminal directly, see "Setup" and "Run" below.
+![Holding card with target-average calculator](docs/screenshot-holding.png)
 
-## Status / what to verify before trusting the numbers
+## The problem
 
-This was built without access to a real export file from your accounts, so
-the Binance and Coinbase parsers are written against the *documented*
-column layout for each exchange's standard export, not a verified sample.
-**Before relying on this for real decisions:**
+Each exchange shows its own trades in its own format and currency. None of them gives a single, cross-exchange average cost in EUR, and none answers "what do I need to buy to reach a target average?".
 
-1. Export one transaction history file from each exchange you use.
-2. Dry-run the parser directly (no server needed) to see what it extracts:
-   ```
-   source venv/bin/activate
-   python -m backend.parsers.binance /path/to/your/binance-export.csv --dry-run
-   python -m backend.parsers.coinbase /path/to/your/coinbase-export.csv --dry-run
-   ```
-3. Compare the printed rows against the source file. If columns don't
-   match, each parser module's docstring explains where to fix the column
-   mapping (`COLUMN_MAP` near the top of `backend/parsers/binance.py` /
-   `coinbase.py`).
+## What it does
 
-Also note: **only EUR-quoted trades are imported automatically.** If you
-traded pairs like BTC/USDT rather than BTC/EUR, those rows are reported as
-skipped rather than silently converted at a guessed exchange rate. Tell me
-if that's most of your history and I'll add a proper historical-FX
-conversion step.
+- **Imports exchange exports**: Binance (Order History and Trade History exports) and Coinbase (Transaction History). Re-uploading the same file is safe, because duplicate rows are detected and skipped.
+- **Normalises everything to EUR**: trades quoted in USD or stablecoins are converted with historical European Central Bank rates, and crypto-to-crypto trades (e.g. AVAX/BTC) are converted using the quote asset's historical EUR price.
+- **Shows holdings per asset**: quantity, average cost, total invested, current price and unrealised P/L.
+- **Target-average calculator**: enter a target average and a hypothetical buy price, and it tells you the quantity and EUR amount needed, or explains why the target can't be reached.
+- **Manual adjustments**: add or remove individual transactions when an export is incomplete.
 
-The average-cost calculation removes sold quantity at the pool's average
-cost (standard "average cost basis" method) — this is not the same as
-FIFO, which is what Spain's Hacienda uses for crypto capital gains tax. If
-you ever need FIFO-based realized gains for a tax filing, that's a
-different calculation from what's here.
+## Product decisions
 
-## Setup
+- **EUR as the single base currency**, because that's my reporting currency.
+- **Average-cost method, not FIFO.** It matches the "average buy price" people expect to see. It is *not* what Spain's tax authority uses for capital gains (FIFO), and the app says so rather than pretending to be a tax tool.
+- **Skip, don't guess.** The first version skipped non-EUR trades instead of converting them at an invented rate. Conversion was only added once there was a reliable source (ECB rates via the Frankfurter API).
+- **Validated against real files.** The first parsers were written against the exchanges' documented formats. Testing them on my real exports showed the Binance format differed, so the column mapping was corrected to match the real files.
+- **Local and private by design.** Data lives in a local SQLite file on my machine, and personal data (database, CSV exports, data-fix scripts) is excluded from this repository.
+
+## Run it
+
+**Easiest (macOS):** double-click `run.command`. The first run installs dependencies, then it opens the app in your browser.
+
+**From the terminal:**
 
 ```bash
-cd crypto-calculator
-python3 -m venv venv          # already done if you received this pre-built
+python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python -m backend.init_db      # creates data/crypto.db with empty tables
+python -m backend.init_db
+uvicorn backend.main:app --port 8000
 ```
 
-## Run
+Then open http://localhost:8000.
 
-```bash
-source venv/bin/activate
-uvicorn backend.main:app --reload --port 8000
-```
+## Tech
 
-Open http://localhost:8000 in your browser.
-
-## Using it
-
-1. **Import transactions**: pick the exchange, choose your exported CSV,
-   click "Upload & import". Re-uploading the same file is safe — duplicate
-   rows are detected and skipped, so you can re-export "everything" each
-   time rather than tracking what's new.
-2. **Holdings**: each card shows quantity held, average cost, current
-   market price (fetched live from CoinGecko, best-effort — shows
-   "unknown" if the symbol isn't recognized or the API is unreachable),
-   total invested, and unrealized P/L.
-3. **Target-average calculator**: expand "Target-average calculator" on
-   any holding, enter a target average and a hypothetical buy price — it
-   tells you the quantity and EUR amount needed, live as you type. If the
-   combination is mathematically unreachable (e.g. target average isn't
-   between the buy price and your current average) it tells you why.
-
-## Project layout
+Python · FastAPI · SQLAlchemy + SQLite · pandas · plain HTML/CSS/JavaScript · ECB exchange rates (Frankfurter API) · CoinGecko prices
 
 ```
 backend/
-  main.py          FastAPI app + routes
-  models.py        SQLAlchemy models (Asset, Transaction)
-  database.py      SQLite engine/session setup
-  calculations.py  average-cost + target-average math
-  prices.py        CoinGecko current-price lookup
-  parsers/
-    binance.py     Binance Spot Trade History CSV parser
-    coinbase.py    Coinbase Transaction History CSV parser
-frontend/
-  index.html, static/app.js, static/style.css   plain HTML/JS dashboard
-data/
-  crypto.db        SQLite database file (created on first run, gitignored)
+  main.py           API routes
+  calculations.py   average-cost and target-average maths
+  fx.py             historical currency conversion to EUR
+  crypto_prices.py  historical crypto prices in EUR
+  prices.py         current prices for the dashboard
+  parsers/          one module per exchange export format
+frontend/           dashboard (HTML, CSS, JS)
 ```
 
-## Adding another exchange later
+To add another exchange, add a parser under `backend/parsers/` that returns rows in the shape defined in `backend/parsers/base.py`, then register it in `backend/main.py`.
 
-Add a new module under `backend/parsers/` that exposes a `parse_file(path)
--> List[NormalizedTx]` function (see `backend/parsers/base.py` for the
-shape), then register it in the `PARSERS` dict in `backend/main.py`.
+## Limitations
+
+- Average-cost method only, so it's not suitable for tax filings that require FIFO.
+- Current prices come from CoinGecko's free API on a best-effort basis. If a price can't be fetched, it shows as unknown.
+- Single-user and runs locally. There's no login and no hosting.
